@@ -16,6 +16,8 @@ tokio = { version = "1.36", features = ["full"] }
 # Web Framework
 actix-web = { version = "4.5", optional = true }
 actix-cors = { version = "0.7", optional = true }
+actix-session = { version = "0.9", features = ["cookie-session"], optional = true }
+actix-files = { version = "0.6", optional = true }
 
 # Database - PostgreSQL
 sqlx = { version = "0.7.4", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
@@ -51,6 +53,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP Client for Gemini API
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# OAuth2 for Google Auth
+oauth2 = "4.4"
 
 # Additional CLI tools
 dialoguer = "0.11"
@@ -107,7 +112,7 @@ path = "src/test_recommendations.rs"
 [features]
 default = ["cli", "api"]
 cli = []
-api = ["actix-web", "actix-cors"]
+api = ["actix-web", "actix-cors", "actix-session", "actix-files"]
 
 # Optional features (disabled until dependencies are added)
 # telemetry = ["opentelemetry", "opentelemetry-jaeger"]

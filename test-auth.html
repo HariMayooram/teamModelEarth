@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Auth Test</title>
+</head>
+<body>
+    <h1>Google Auth Test</h1>
+    <button id="test-connection">Test Backend Connection</button>
+    <button id="test-auth">Test Google Auth</button>
+    <div id="output"></div>
+
+    <script>
+        const output = document.getElementById('output');
+
+        document.getElementById('test-connection').onclick = async () => {
+            try {
+                output.innerHTML = '<p>Testing backend connection...</p>';
+                const response = await fetch('http://localhost:8081/api/health');
+                const data = await response.json();
+                output.innerHTML = `<p>✅ Backend connected: ${JSON.stringify(data)}</p>`;
+            } catch (error) {
+                output.innerHTML = `<p>❌ Connection failed: ${error.message}</p>`;
+            }
+        };
+
+        document.getElementById('test-auth').onclick = async () => {
+            try {
+                output.innerHTML = '<p>Testing Google Auth URL...</p>';
+                const response = await fetch('http://localhost:8081/api/google/auth/url');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.auth_url) {
+                    output.innerHTML = `
+                        <p>✅ Google Auth URL generated successfully!</p>
+                        <p><strong>State:</strong> ${data.state}</p>
+                        <p><a href="${data.auth_url}" target="_blank">Click to test OAuth flow</a></p>
+                    `;
+                } else {
+                    output.innerHTML = `<p>❌ No auth_url in response: ${JSON.stringify(data)}</p>`;
+                }
+            } catch (error) {
+                output.innerHTML = `<p>❌ Auth test failed: ${error.message}</p>`;
+                console.error('Full error:', error);
+            }
+        };
+    </script>
+</body>
+</html>

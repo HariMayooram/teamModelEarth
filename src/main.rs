@@ -1,6 +1,8 @@
 // src/main.rs
 use actix_cors::Cors;
 use actix_web::{web, App, HttpResponse, HttpServer, Result, middleware};
+use actix_session::{Session, SessionMiddleware, storage::CookieSessionStore};
+use actix_web::cookie::SameSite;
 use anyhow::Context;
 use chrono::{Utc, NaiveDate};
 use clap::{Parser, Subcommand};
@@ -16,6 +18,11 @@ use uuid::Uuid;
 use url::Url;
 use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config as NotifyConfig};
 use std::sync::mpsc::channel;
+use oauth2::{AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl, CsrfToken, Scope};
+use oauth2::basic::BasicClient;
+use oauth2::reqwest::async_http_client;
+use oauth2::{AuthorizationCode, TokenResponse};
+use actix_web::cookie::time::Duration as CookieDuration;
 
 // Google Sheets API imports (TODO: Fix version conflicts)
 // use google_sheets4::{Sheets, api::ValueRange};
@@ -38,10 +45,50 @@ struct Config {
     server_port: u16,
     excel_file_path: String,
     site_favicon: Option<String>,
+    google_client_id: String,
+    google_client_secret: String,
+    session_key: String,
+    allowed_redirect_domains: Vec<String>,
+    is_production: bool,
+    frontend_url: String,
 }
 
 // Thread-safe configuration holder
 type SharedConfig = Arc<Mutex<Config>>;
+
+// Rate limiting for auth endpoints
+#[derive(Debug)]
+struct RateLimiter {
+    requests: Arc<Mutex<HashMap<String, Vec<u64>>>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn check_rate_limit(&self, ip: &str, max_requests: usize, window_seconds: u64) -> bool {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut requests = self.requests.lock().unwrap();
+        
+        let user_requests = requests.entry(ip.to_string()).or_insert_with(Vec::new);
+        
+        // Remove old requests outside the window
+        user_requests.retain(|&timestamp| now - timestamp < window_seconds);
+        
+        if user_requests.len() >= max_requests {
+            return false; // Rate limit exceeded
+        }
+        
+        user_requests.push(now);
+        true
+    }
+}
+
+// CSRF token storage
+type CsrfTokenStore = Arc<Mutex<HashMap<String, (String, u64)>>>;
 
 impl Config {
     fn from_env() -> anyhow::Result<Self> {
@@ -68,6 +115,18 @@ impl Config {
                 excel_file_path: std::env::var("EXCEL_FILE_PATH")
                     .unwrap_or_else(|_| "preferences/projects/DFC-ActiveProjects.xlsx".to_string()),
                 site_favicon: std::env::var("SITE_FAVICON").ok(),
+                google_client_id: std::env::var("GOOGLE_CLIENT_ID")
+                    .unwrap_or_else(|_| "your-google-client-id.apps.googleusercontent.com".to_string()),
+                google_client_secret: std::env::var("GOOGLE_CLIENT_SECRET")
+                    .unwrap_or_else(|_| "your-google-client-secret".to_string()),
+                session_key: std::env::var("SESSION_KEY")
+                    .unwrap_or_else(|_| "your-32-byte-session-key-here-change-in-production".to_string()),
+                allowed_redirect_domains: std::env::var("ALLOWED_REDIRECT_DOMAINS")
+                    .unwrap_or_else(|_| "localhost:8887,localhost:8888".to_string())
+                    .split(',').map(|s| s.trim().to_string()).collect(),
+                is_production: std::env::var("NODE_ENV").unwrap_or_default() == "production",
+                frontend_url: std::env::var("FRONTEND_URL")
+                    .unwrap_or_else(|_| "http://localhost:8887/team".to_string()),
             })
         }
     }
@@ -292,6 +351,63 @@ struct GoogleAuthResponse {
     picture: Option<String>,
 }
 
+// OAuth URL response
+#[derive(Debug, Serialize, Deserialize)]
+struct OAuthUrlResponse {
+    auth_url: String,
+    state: String,
+}
+
+// OAuth callback request
+#[derive(Debug, Serialize, Deserialize)]
+struct OAuthCallbackRequest {
+    code: String,
+    state: Option<String>,
+}
+
+// User session info
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct UserSession {
+    user_id: String,
+    email: String,
+    name: String,
+    picture: Option<String>,
+    created_at: i64,
+    expires_at: i64,
+}
+
+impl UserSession {
+    fn is_expired(&self) -> bool {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        now > self.expires_at
+    }
+
+    fn new(user_id: String, email: String, name: String, picture: Option<String>) -> Self {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let expires_at = now + (24 * 60 * 60); // 24 hours from now
+        
+        Self {
+            user_id,
+            email,
+            name,
+            picture,
+            created_at: now,
+            expires_at,
+        }
+    }
+}
+
+// Google user info from token
+#[derive(Debug, Serialize, Deserialize)]
+struct GoogleUserInfo {
+    id: String,
+    email: String,
+    name: String,
+    picture: Option<String>,
+    given_name: Option<String>,
+    family_name: Option<String>,
+}
+
 // Google Sheets member data request
 #[derive(Debug, Serialize, Deserialize)]
 struct GoogleSheetsMemberRequest {
@@ -445,7 +561,7 @@ async fn get_env_config() -> Result<HttpResponse> {
             };
             
             let display_name = match prefix {
-                "COMMONS" => "PartnerTools Database (Default)".to_string(),
+                "COMMONS" => "MemberCommons Database (Default)".to_string(),
                 "EXIOBASE" => "EXIOBASE Database".to_string(),
                 _ => format!("{} Database", prefix.replace('_', " ")),
             };
@@ -500,7 +616,7 @@ async fn get_env_config() -> Result<HttpResponse> {
                 
                 // Add to connections list with display name
                 let display_name = match key.as_str() {
-                    "DATABASE_URL" => "PartnerTools Database (Default)".to_string(),
+                    "DATABASE_URL" => "MemberCommons Database (Default)".to_string(),
                     "EXIOBASE_URL" => "EXIOBASE Database".to_string(),
                     _ => {
                         let name = key.replace("_URL", "").replace("_", " ");
@@ -781,22 +897,373 @@ async fn create_google_project(req: web::Json<CreateGoogleProjectRequest>) -> Re
 }
 
 // Google OAuth verification handler
-async fn verify_google_auth(_req: web::Json<GoogleAuthRequest>) -> Result<HttpResponse> {
-    // For now, return a placeholder response indicating OAuth integration is needed
-    // In a real implementation, this would:
-    // 1. Verify the JWT credential with Google's API
-    // 2. Extract user information (name, email, picture)
-    // 3. Return user data for frontend use
+// Get redirect URI with intelligent defaults
+fn get_redirect_uri(config: &Config) -> String {
+    // Check if custom redirect URI is set
+    if let Ok(custom_uri) = std::env::var("GOOGLE_REDIRECT_URI") {
+        return custom_uri;
+    }
+    
+    // Handle localhost vs 127.0.0.1 variations
+    let host = if config.server_host == "127.0.0.1" || config.server_host == "localhost" {
+        "localhost"  // Google prefers localhost over 127.0.0.1
+    } else {
+        &config.server_host
+    };
+    
+    format!("http://{}:{}/api/google/auth/callback", host, config.server_port)
+}
+
+fn create_oauth_client(config: &Config) -> BasicClient {
+    BasicClient::new(
+        ClientId::new(config.google_client_id.clone()),
+        Some(ClientSecret::new(config.google_client_secret.clone())),
+        AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string()).unwrap(),
+        Some(TokenUrl::new("https://oauth2.googleapis.com/token".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(get_redirect_uri(&config)).unwrap())
+}
+
+async fn google_auth_url(data: web::Data<SharedConfig>) -> Result<HttpResponse> {
+    
+    let config = data.lock().unwrap();
+    
+    // Check if Google credentials are configured (don't expose debug info in production)
+    if config.google_client_id.contains("your-google-client-id") {
+        let response = if config.is_production {
+            json!({
+                "error": "Authentication service temporarily unavailable",
+                "message": "Please try again later"
+            })
+        } else {
+            json!({
+                "error": "Google OAuth not configured",
+                "message": "Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your .env file",
+                "debug_info": {
+                    "client_id_configured": false,
+                    "redirect_uri": get_redirect_uri(&config)
+                }
+            })
+        };
+        return Ok(HttpResponse::ServiceUnavailable().json(response));
+    }
+    
+    if config.google_client_secret.contains("your-google-client-secret") {
+        let response = if config.is_production {
+            json!({
+                "error": "Authentication service temporarily unavailable",
+                "message": "Please try again later"
+            })
+        } else {
+            json!({
+                "error": "Google OAuth client secret not configured", 
+                "message": "Please set GOOGLE_CLIENT_SECRET in your .env file"
+            })
+        };
+        return Ok(HttpResponse::ServiceUnavailable().json(response));
+    }
+    
+    let client = create_oauth_client(&config);
+    
+    let (auth_url, csrf_token) = client
+        .authorize_url(CsrfToken::new_random)
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .add_scope(Scope::new("openid".to_string()))
+        .url();
+    
+    // For now, simplified CSRF handling (state is validated by OAuth2 lib)
+    
+    log::info!("Generated OAuth URL for redirect_uri: {}", get_redirect_uri(&config));
+    
+    Ok(HttpResponse::Ok().json(OAuthUrlResponse {
+        auth_url: auth_url.to_string(),
+        state: csrf_token.secret().clone(),
+    }))
+}
+
+// Helper function to validate redirect URL against whitelist
+fn validate_redirect_url(url: &str, config: &Config) -> bool {
+    if let Ok(parsed_url) = Url::parse(url) {
+        if let Some(host) = parsed_url.host_str() {
+            let host_with_port = if let Some(port) = parsed_url.port() {
+                format!("{}:{}", host, port)
+            } else {
+                host.to_string()
+            };
+            
+            return config.allowed_redirect_domains.iter()
+                .any(|domain| domain == &host_with_port || domain == host);
+        }
+    }
+    false
+}
+
+// Helper function to create redirect response
+fn create_auth_redirect(success: bool, message: Option<&str>, config: &Config) -> HttpResponse {
+    // Use configurable frontend URL from environment
+    let redirect_url = if success {
+        format!("{}/?auth=success#account/preferences", config.frontend_url)
+    } else {
+        let msg = message.unwrap_or("unknown_error");
+        format!("{}/?auth=error&message={}", config.frontend_url, msg)
+    };
+    
+    // Validate redirect URL
+    if !validate_redirect_url(&redirect_url, config) {
+        log::error!("Invalid redirect URL: {}", redirect_url);
+        return HttpResponse::BadRequest().json(json!({
+            "error": "Invalid redirect URL"
+        }));
+    }
+    
+    log::info!("Redirecting to: {}", redirect_url);
+    
+    HttpResponse::Found()
+        .append_header(("Location", redirect_url))
+        .finish()
+}
+
+async fn google_auth_callback(
+    query: web::Query<OAuthCallbackRequest>,
+    session: Session,
+    data: web::Data<SharedConfig>,
+) -> Result<HttpResponse> {
+    log::info!("OAuth callback received with code: {}", &query.code[..10]);
+    
+    let config = data.lock().unwrap();
+    
+    // Check if Google credentials are configured
+    if config.google_client_id.contains("your-google-client-id") {
+        log::error!("Google OAuth not configured - using demo user");
+        return Ok(create_auth_redirect(false, Some("oauth_not_configured"), &config));
+    }
+    
+    // Create OAuth client
+    let client = create_oauth_client(&config);
+    drop(config); // Release the lock
+    
+    // Exchange the authorization code for an access token
+    let token_response = match client
+        .exchange_code(AuthorizationCode::new(query.code.clone()))
+        .request_async(async_http_client)
+        .await
+    {
+        Ok(token) => token,
+        Err(e) => {
+            log::error!("Failed to exchange code for token: {:?}", e);
+            let config = data.lock().unwrap();
+            return Ok(create_auth_redirect(false, Some("token_exchange_failed"), &config));
+        }
+    };
+    
+    // Use the access token to get user information from Google
+    let user_info_url = format!(
+        "https://www.googleapis.com/oauth2/v2/userinfo?access_token={}",
+        token_response.access_token().secret()
+    );
+    
+    let user_info: GoogleUserInfo = match reqwest::get(&user_info_url).await {
+        Ok(response) => {
+            if !response.status().is_success() {
+                log::error!("Failed to get user info, status: {}", response.status());
+                let config = data.lock().unwrap();
+                return Ok(create_auth_redirect(false, Some("user_info_failed"), &config));
+            }
+            match response.json().await {
+                Ok(info) => info,
+                Err(e) => {
+                    log::error!("Failed to parse user info JSON: {:?}", e);
+                    let config = data.lock().unwrap();
+                    return Ok(create_auth_redirect(false, Some("user_info_parse_failed"), &config));
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to fetch user info: {:?}", e);
+            let config = data.lock().unwrap();
+            return Ok(create_auth_redirect(false, Some("network_error"), &config));
+        }
+    };
+    
+    log::info!("Successfully retrieved user info for: {}", user_info.email);
+    
+    // Create a UserSession object with real user data
+    let user_session = UserSession::new(
+        user_info.id.clone(),
+        user_info.email.clone(),
+        user_info.name.clone(),
+        user_info.picture.clone(),
+    );
+    
+    // Store user session
+    if let Err(e) = session.insert("user", &user_session) {
+        log::error!("Failed to store user session: {:?}", e);
+        let config = data.lock().unwrap();
+        return Ok(create_auth_redirect(false, Some("session_store_failed"), &config));
+    }
+    
+    log::info!("User session created successfully for: {}", user_info.email);
+    
+    // Redirect back to frontend with auth success parameter
+    let config = data.lock().unwrap();
+    Ok(create_auth_redirect(true, None, &config))
+}
+
+async fn ensure_user_exists(pool: &Pool<Postgres>, user_info: &GoogleUserInfo) -> anyhow::Result<String> {
+    // First, find user by checking email addresses table and relationships
+    let existing_user = sqlx::query(
+        r#"
+        SELECT u.id FROM users u
+        JOIN email_addr_bean_rel eabr ON u.id = eabr.bean_id
+        JOIN email_addresses ea ON eabr.email_address_id = ea.id
+        WHERE ea.email_address = $1 AND eabr.bean_module = 'Users' AND eabr.deleted = 0
+        "#
+    )
+    .bind(&user_info.email)
+    .fetch_optional(pool)
+    .await?;
+    
+    if let Some(row) = existing_user {
+        return Ok(row.try_get::<Uuid, _>("id")?.to_string());
+    }
+    
+    // Create new user and email relationship
+    let user_id = Uuid::new_v4();
+    let email_id = Uuid::new_v4();
+    let now = Utc::now();
+    
+    // Start transaction
+    let mut tx = pool.begin().await?;
+    
+    // Insert user
+    sqlx::query(
+        r#"INSERT INTO users (id, first_name, last_name, user_name,
+           date_entered, date_modified, created_by, modified_user_id, status, deleted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', false)"#
+    )
+    .bind(&user_id)
+    .bind(user_info.given_name.as_deref().unwrap_or(""))
+    .bind(user_info.family_name.as_deref().unwrap_or(""))
+    .bind(&user_info.email) // Use email as username
+    .bind(&now)
+    .bind(&now)
+    .bind(&user_id)
+    .bind(&user_id)
+    .execute(&mut *tx)
+    .await?;
+    
+    // Insert email address
+    sqlx::query(
+        r#"INSERT INTO email_addresses (id, email_address, date_created, date_modified)
+           VALUES ($1, $2, $3, $4)"#
+    )
+    .bind(&email_id)
+    .bind(&user_info.email)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    
+    // Link email to user
+    sqlx::query(
+        r#"INSERT INTO email_addr_bean_rel (id, email_address_id, bean_id, bean_module, primary_address, deleted)
+           VALUES (uuid_generate_v4(), $1, $2, 'Users', true, false)"#
+    )
+    .bind(&email_id)
+    .bind(&user_id)
+    .execute(&mut *tx)
+    .await?;
+    
+    tx.commit().await?;
+    
+    Ok(user_id.to_string())
+}
+
+async fn get_current_user(session: Session, req: actix_web::HttpRequest) -> Result<HttpResponse> {
+    log::info!("Checking user session...");
+    
+    // Log all cookies for debugging
+    let cookies: Vec<String> = req.headers()
+        .get_all("cookie")
+        .map(|h| h.to_str().unwrap_or("invalid").to_string())
+        .collect();
+    log::info!("Received cookies: {:?}", cookies);
+    
+    match session.get::<UserSession>("user")? {
+        Some(user) => {
+            // Check if session has expired
+            if user.is_expired() {
+                log::info!("User session expired for: {}", user.email);
+                session.clear();
+                Ok(HttpResponse::Ok().json(json!({"success": false, "error": "Session expired"})))
+            } else {
+                log::info!("Found valid user session: {}", user.email);
+                Ok(HttpResponse::Ok().json(json!({"success": true, "user": user})))
+            }
+        },
+        None => {
+            log::warn!("No user session found in session storage");
+            Ok(HttpResponse::Ok().json(json!({"success": false, "error": "Not authenticated"})))
+        },
+    }
+}
+
+// Debug endpoint to check session status
+async fn debug_session(session: Session) -> Result<HttpResponse> {
+    let session_data: Option<UserSession> = session.get("user").unwrap_or(None);
     
     Ok(HttpResponse::Ok().json(json!({
+        "session_exists": session_data.is_some(),
+        "session_data": session_data,
+        "debug": "This endpoint helps debug session issues"
+    })))
+}
+
+async fn logout_user(session: Session) -> Result<HttpResponse> {
+    session.clear();
+    Ok(HttpResponse::Ok().json(json!({"success": true})))
+}
+
+async fn debug_oauth_config(data: web::Data<SharedConfig>) -> Result<HttpResponse> {
+    let config = data.lock().unwrap();
+    let redirect_uri = get_redirect_uri(&config);
+    
+    let client_id_configured = !config.google_client_id.contains("your-google-client-id");
+    let client_secret_configured = !config.google_client_secret.contains("your-google-client-secret");
+    let session_key_configured = !config.session_key.contains("your-32-byte-session-key");
+    
+    Ok(HttpResponse::Ok().json(json!({
+        "server_host": config.server_host,
+        "server_port": config.server_port,
+        "redirect_uri": redirect_uri,
+        "configuration": {
+            "client_id_configured": client_id_configured,
+            "client_secret_configured": client_secret_configured,
+            "session_key_configured": session_key_configured,
+            "all_configured": client_id_configured && client_secret_configured && session_key_configured
+        },
+        "environment": {
+            "custom_redirect_uri": std::env::var("GOOGLE_REDIRECT_URI").ok()
+        },
+        "instructions": {
+            "setup": "1. Copy .env.example to .env, 2. Set Google credentials, 3. Restart server",
+            "test_url": "/api/google/auth/url",
+            "google_console": "https://console.cloud.google.com/apis/credentials"
+        }
+    })))
+}
+
+async fn verify_google_auth(_req: web::Json<GoogleAuthRequest>) -> Result<HttpResponse> {
+    Ok(HttpResponse::Ok().json(json!({
         "success": false,
-        "error": "Google OAuth verification is not yet implemented.",
-        "message": "This feature requires Google OAuth2 integration. Please use the 'Via Google Page' method for now.",
-        "implementation_needed": [
-            "JWT token verification with Google",
-            "User profile data extraction",
-            "Secure session management"
-        ]
+        "error": "Deprecated endpoint. Use OAuth flow instead.",
+        "oauth_endpoints": {
+            "start_auth": "/api/google/auth/url",
+            "callback": "/api/google/auth/callback", 
+            "current_user": "/api/google/auth/user",
+            "logout": "/api/google/auth/logout"
+        }
     })))
 }
 
@@ -2293,27 +2760,61 @@ async fn run_api_server(config: Config) -> anyhow::Result<()> {
     // Create persistent Claude session manager
     let claude_session_manager: ClaudeSessionManager = Arc::new(Mutex::new(ClaudeSession::new()));
     
+    // Create security components
+    let rate_limiter = Arc::new(RateLimiter::new());
+    let csrf_store: CsrfTokenStore = Arc::new(Mutex::new(HashMap::new()));
+    
     // Get server config from shared config
-    let (server_host, server_port) = {
+    let (server_host, server_port, is_production) = {
         let config_guard = shared_config.lock().unwrap();
-        (config_guard.server_host.clone(), config_guard.server_port)
+        (config_guard.server_host.clone(), config_guard.server_port, config_guard.is_production)
     };
     
     println!("Starting API server on {server_host}:{server_port}");
     let session_manager_clone = claude_session_manager.clone();
+    let rate_limiter_clone = rate_limiter.clone();
+    let csrf_store_clone = csrf_store.clone();
     
     HttpServer::new(move || {
         let cors = Cors::default()
-            .allow_any_origin()
+            .allowed_origin("http://localhost:8887") // Specific frontend origin
+            .allowed_origin("http://localhost:8888") // Alternative frontend port
             .allow_any_method()
             .allow_any_header()
+            .supports_credentials() // Enable credentials for session cookies
             .max_age(3600);
+        
+        let session_key = {
+            let config_guard = state.config.lock().unwrap();
+            actix_web::cookie::Key::from(config_guard.session_key.as_bytes())
+        };
         
         App::new()
             .app_data(web::Data::new(state.clone()))
+            .app_data(web::Data::new(shared_config.clone()))
             .app_data(web::Data::new(session_manager_clone.clone()))
+            .app_data(web::Data::new(rate_limiter_clone.clone()))
+            .app_data(web::Data::new(csrf_store_clone.clone()))
             .wrap(cors)
             .wrap(middleware::Logger::default())
+            .wrap({
+                let config_guard = shared_config.lock().unwrap();
+                let is_production = config_guard.is_production;
+                drop(config_guard);
+                
+                SessionMiddleware::builder(CookieSessionStore::default(), session_key)
+                    .cookie_secure(is_production) // HTTPS required in production
+                    .cookie_domain(if is_production { None } else { Some("localhost".to_string()) })
+                    .cookie_same_site(if is_production { SameSite::Strict } else { SameSite::Lax })
+                    .cookie_path("/".to_string())
+                    .cookie_name("membercommons_session".to_string())
+                    .cookie_http_only(true) // Always prevent JavaScript access
+                    .session_lifecycle(
+                        actix_session::config::PersistentSession::default()
+                            .session_ttl(CookieDuration::seconds(24 * 60 * 60))
+                    )
+                    .build()
+            })
             .service(
                 web::scope("/api")
                     .route("/health", web::get().to(health_check))
@@ -2354,6 +2855,12 @@ async fn run_api_server(config: Config) -> anyhow::Result<()> {
                             .service(
                                 web::scope("/auth")
                                     .route("/verify", web::post().to(verify_google_auth))
+                                    .route("/url", web::get().to(google_auth_url))
+                                    .route("/callback", web::get().to(google_auth_callback))
+                                    .route("/user", web::get().to(get_current_user))
+                                    .route("/logout", web::post().to(logout_user))
+                                    .route("/debug", web::get().to(debug_oauth_config))
+                                    .route("/session-debug", web::get().to(debug_session))
                             )
                             .service(
                                 web::scope("/sheets")

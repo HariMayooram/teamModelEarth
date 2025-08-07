@@ -499,24 +499,20 @@
                     <!-- Welcome Tab -->
                     <div class="tab-content" id="welcome-tab">
                         <div class="welcome-hero">
-                            <!--
                             <div style="float:right">
-                                <a href="https://bolt.new/" target="bolt"><img onclick="goWelcome()" style="cursor:pointer; width:130px;" src="img/xxxx"></a>
+                                <a href="https://bolt.new/" target="bolt"><img onclick="goWelcome()" style="cursor:pointer; width:130px;" src="img/logo/bolt/bolt-built.png"></a>
                             </div>
-                            -->
                             <div style="overflow:auto">
-                                <h1 class="hero-title">Collaborative Data Science</h1>
-                                <p class="hero-subtitle">The AI<!--ultimate--> collaboration platform for <!--technical teams working on --> code automation projects</p>
+                                <h1 class="hero-title">Welcome to DemocracyLab 2.0!</h1>
+                                <p class="hero-subtitle">The AI<!--ultimate--> collaboration platform for <!--technical teams working on --> open innovation projects</p>
                                 <button class="btn btn-secondary" onclick="showAuthModal()" style="margin-bottom:15px">Create Account</button>
-                                <!--
-                                <button class="btn btn-secondary" onclick="goPreferences()">Team Map</button>
-                                -->
+                                <button class="btn btn-secondary" onclick="goPreferences()">Policy Preferences</button>
                             </div>
 
                         </div>
 
                         <div style="float:right; margin-right:20px">
-                            <b><a href="admin">Admin Dashboard</a></b><br>
+                            <b><a href="https://bolt.new" style="color: var(--accent-blue);">Bolt AI</a> - <a href="admin">Partner Tool Development</a></b><br>
                         </div>
 
                         <div class="tabs">
@@ -570,7 +566,7 @@
                     <div class="tab-content" id="documentation-tab">
                         <div class="card">
                             <h2 class="card-title">Getting Started</h2>
-                            <p>PartnerTools is designed for technical collaborators working AI integrated projects. Here's how to get the most out of the platform:</p>
+                            <p>MemberCommons is designed for technical collaborators working AI integrated projects. Here's how to get the most out of the platform:</p>
                             
                             <!--
                             <h3 style="margin-top: 24px; margin-bottom: 12px;">Quick Start Guide</h3>
@@ -734,7 +730,7 @@
 
                     <div class="hero-section">
                         <div class="hero-content">
-                            <h1 class="hero-title">Partner Tool Suite</h1>
+                            <h1 class="hero-title">MemberCommons</h1>
                             <p class="hero-subtitle">Team Collaboration Platform for Project Tracking with AI Insights</p>
                             <div class="hero-actions">
                                 <button class="btn btn-primary" onclick="router.navigate('projects', 'opportunities')">
@@ -1071,7 +1067,7 @@
                             <div class="card-header">
                                 <h2 class="card-title">Organizations</h2>
                                 <button class="btn btn-primary">
-                                    <i data-feather="home"></i>
+                                    <i data-feather="building"></i>
                                     Register Organization
                                 </button>
                             </div>
@@ -1958,7 +1954,7 @@
             
             const pageTitle = document.getElementById('page-title');
             if (pageTitle) {
-                pageTitle.textContent = titles[sectionName] || 'PartnerTools';
+                pageTitle.textContent = titles[sectionName] || 'MemberCommons';
             }
             
             // Scroll to top when switching main sections
@@ -2025,26 +2021,53 @@
             }
         }
 
-        function signInWith(provider) {
+        async function signInWith(provider) {
             console.log(`Signing in with ${provider}`);
-            // Implement OAuth flows here
+            
             switch(provider) {
                 case 'google':
-                    // Google OAuth implementation
+                    await initiateGoogleAuth();
                     break;
                 case 'github':
-                    // GitHub OAuth implementation
+                    console.log('GitHub OAuth not yet implemented');
                     break;
                 case 'linkedin':
-                    // LinkedIn OAuth implementation
+                    console.log('LinkedIn OAuth not yet implemented');
                     break;
             }
-            
-            // For demo purposes, simulate successful login
-            setTimeout(() => {
-                simulateLogin(`${provider}-user@example.com`);
-                hideAuthModal();
-            }, 1000);
+        }
+
+        async function initiateGoogleAuth() {
+            try {
+                console.log('Initiating Google OAuth...');
+                const response = await fetch('http://localhost:8081/api/google/auth/url');
+                
+                console.log('Response status:', response.status);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Server error:', errorText);
+                    alert(`Server error (${response.status}): ${errorText}`);
+                    return;
+                }
+                
+                const data = await response.json();
+                console.log('OAuth response:', data);
+                
+                if (data.auth_url) {
+                    // Store state for verification
+                    sessionStorage.setItem('oauth_state', data.state);
+                    console.log('Redirecting to Google OAuth...');
+                    // Redirect to Google OAuth
+                    window.location.href = data.auth_url;
+                } else {
+                    console.error('No auth_url in response:', data);
+                    alert(`Failed to get OAuth URL: ${data.error || 'Unknown error'}`);
+                }
+            } catch (error) {
+                console.error('Network/fetch error:', error);
+                alert(`Network error: ${error.message}. Is the server running on port 8081?`);
+            }
         }
 
         function signInWithEmail(event) {
@@ -2062,7 +2085,7 @@
         }
 
         function adminDemo() {
-            simulateLogin('admin@PartnerTools.local', 'Admin User');
+            simulateLogin('admin@membercommons.local', 'Admin User');
         }
 
         function simulateLogin(email, name = null) {
@@ -2153,8 +2176,219 @@
             });
         }
 
+        // Production-level Authentication Management
+        async function checkAuthenticationStatus() {
+            console.log('Starting authentication check...');
+            
+            // Check if this is an OAuth callback
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('auth') === 'success') {
+                console.log('✅ OAuth callback: SUCCESS - retrieving user data...');
+                
+                // Debug session before checking user
+                await debugSession();
+                
+                // Handle successful OAuth callback
+                const user = await getCurrentUser();
+                
+                if (user) {
+                    console.log('Authentication successful for:', user.email);
+                } else {
+                    console.warn('⚠️ OAuth success but user retrieval failed');
+                }
+                
+                // Clear the URL parameter
+                window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+                return;
+            } else if (urlParams.get('auth') === 'error') {
+                console.error('❌ OAuth callback: ERROR - authentication failed');
+                const errorMessage = urlParams.get('message') || 'unknown_error';
+                console.error('📋 OAuth error details:', errorMessage);
+                
+                // Show user-friendly error message
+                let friendlyMessage = 'Google sign-in failed. ';
+                switch(errorMessage) {
+                    case 'oauth_not_configured':
+                        friendlyMessage += 'Google OAuth is not configured on the server.';
+                        break;
+                    case 'token_exchange_failed':
+                        friendlyMessage += 'Failed to exchange authorization code.';
+                        break;
+                    case 'user_info_failed':
+                    case 'user_info_parse_failed':
+                        friendlyMessage += 'Failed to retrieve user information from Google.';
+                        break;
+                    case 'network_error':
+                        friendlyMessage += 'Network error occurred during authentication.';
+                        break;
+                    case 'session_store_failed':
+                        friendlyMessage += 'Failed to create user session.';
+                        break;
+                    default:
+                        friendlyMessage += 'Please try again.';
+                }
+                
+                alert(friendlyMessage);
+                
+                // Clear the URL parameters
+                window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+                return;
+            }
+            
+            // Check existing session
+            console.log('Checking existing session...');
+            await getCurrentUser();
+        }
+
+        // Simplified authentication management
+        async function getCurrentUser() {
+            try {
+                console.log('Checking current user authentication...');
+                const response = await fetch('http://localhost:8081/api/google/auth/user', {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }
+                
+                const data = await response.json();
+                console.log('Auth response:', data);
+                
+                if (data.success && data.user) {
+                    console.log('User authenticated:', data.user.email);
+                    console.log('Setting AppState.currentUser to:', data.user);
+                    AppState.isAuthenticated = true;
+                    AppState.currentUser = data.user;
+                    console.log('Calling updateAuthUI...');
+                    updateAuthUI();
+                    console.log('AppState after update:', AppState);
+                    return data.user;
+                } else {
+                    console.log('User not authenticated:', data.error || 'Unknown error');
+                    AppState.isAuthenticated = false;
+                    AppState.currentUser = null;
+                    updateAuthUI();
+                    return null;
+                }
+            } catch (error) {
+                console.error('Authentication check failed:', error);
+                AppState.isAuthenticated = false;
+                AppState.currentUser = null;
+                updateAuthUI();
+                return null;
+            }
+        }
+        
+        async function debugSession() {
+            try {
+                const response = await fetch('http://localhost:8081/api/google/auth/session-debug', {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                console.log('Session Debug:', data);
+                return data;
+            } catch (error) {
+                console.error('Session debug failed:', error);
+                return null;
+            }
+        }
+
+        async function logoutUser() {
+            try {
+                console.log('Logging out user...');
+                const response = await fetch('http://localhost:8081/api/google/auth/logout', { 
+                    method: 'POST',
+                    credentials: 'include',  // Include cookies for cross-port authentication
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (response.ok) {
+                    console.log('Logout successful');
+                } else {
+                    console.warn('Logout response not OK:', response.status);
+                }
+                
+                // Clear local state regardless of response
+                AppState.isAuthenticated = false;
+                AppState.currentUser = null;
+                updateAuthUI();
+                
+                // Redirect to home
+                window.location.hash = '#home/welcome';
+            } catch (error) {
+                console.error(' Logout error:', error);
+                // Still clear local state on error
+                AppState.isAuthenticated = false;
+                AppState.currentUser = null;
+                updateAuthUI();
+            }
+        }
+
+        function updateAuthUI() {
+            const authContainer = document.getElementById('auth-container');
+            const authButton = authContainer?.querySelector('.btn');
+            
+            if (AppState.isAuthenticated && AppState.currentUser) {
+                if (authButton) {
+                    authButton.innerHTML = `
+                        ${AppState.currentUser.name || AppState.currentUser.email}
+                        <span style="margin-left: 10px; cursor: pointer;" onclick="logoutUser()" title="Logout">🚪</span>
+                    `;
+                    authButton.onclick = () => window.location.hash = '#account/preferences';
+                }
+            } else {
+                if (authButton) {
+                    authButton.textContent = 'Sign In';
+                    authButton.onclick = showAuthModal;
+                }
+            }
+        }
+
+        // Simple test - this should work if JavaScript is parsing correctly
+        window.simpleTest = function() {
+            console.log('JavaScript is working!');
+            return 'SUCCESS';
+        };
+        
+        // Test function for manual debugging
+        window.testAuth = async function() {
+            console.log('Manual auth test started...');
+            await getCurrentUser();
+            await debugSession();
+        };
+        
+        // Manual UI test
+        window.testUI = function() {
+            console.log('Testing UI update...');
+            console.log('Current AppState:', AppState);
+            
+            // Check if auth container exists
+            const authContainer = document.getElementById('auth-container');
+            console.log('Auth container element:', authContainer);
+            
+            updateAuthUI();
+            console.log('UI update called');
+            
+            // Check what happened to the auth container after update
+            console.log('Auth container after update:', authContainer);
+            if (authContainer) {
+                console.log('Auth container HTML:', authContainer.innerHTML);
+            }
+        };
+        
         // Initialize the application
         document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM Content Loaded - Starting application initialization...');
+            
+            // Check authentication status and handle OAuth callback
+            checkAuthenticationStatus();
             
             // Setup tab click handlers
             setupTabHandlers();
