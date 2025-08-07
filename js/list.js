@@ -1,5 +1,5 @@
 /**
- * Shared utility functions for PartnerTools
+ * Shared utility functions
  * Extracted from admin/import-data.html for reuse across multiple pages
  */
 

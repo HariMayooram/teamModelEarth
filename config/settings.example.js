@@ -82,7 +82,7 @@ const CONFIG = {
         // Email Service (for notifications)
         EMAIL: {
             PROVIDER: 'smtp', // smtp, sendgrid, etc.
-            FROM_ADDRESS: 'noreply@PartnerTools.org'
+            FROM_ADDRESS: 'noreply@yourdomain.com'
         },
         
         // Analytics

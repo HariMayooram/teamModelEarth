@@ -871,7 +871,7 @@ async fn get_sheets_config() -> Result<HttpResponse> {
                         "accentColor": "#10B981"
                     },
                     "messages": {
-                        "welcomeNew": "Welcome to PartnerTools! Please fill out the registration form to join our community of developers working on sustainable impact projects.",
+                        "welcomeNew": "Welcome! Please fill out the registration form to join our community of developers working on sustainable impact projects.",
                         "welcomeReturning": "Welcome back! Your existing information has been loaded. Please review and update any details as needed."
                     },
                     "behavior": {
