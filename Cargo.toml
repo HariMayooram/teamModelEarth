@@ -57,6 +57,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 # OAuth2 for Google Auth
 oauth2 = "4.4"
 
+# JWT handling for Supabase
+jsonwebtoken = "9.2"
+
 # Additional CLI tools
 dialoguer = "0.11"
 colored = "2.1"

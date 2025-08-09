@@ -17,6 +17,11 @@
     <!-- Standalone Navigation -->
     <link rel="stylesheet" href="css/standalone-nav.css">
     <script src="js/standalone-nav.js"></script>
+    
+    <!-- Configuration -->
+    
+    <!-- Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <style>
         :root {
@@ -522,7 +527,7 @@
                         </div>
 
                         <div class="feature-grid">
-                            <div class="feature-card clickable-card" onclick="smartClick(event, () => window.location.href='./admin/import-data.html')">
+                            <div class="feature-card clickable-card" onclick="smartClick(event, () => window.location.href='admin/import-data.html')">
                                 <div class="feature-icon">
                                     <i data-feather="zap"></i>
                                 </div>
@@ -546,7 +551,7 @@
                                 <p class="feature-desc">Manage opportunities, track progress, assign tasks, and monitor timelines with beautiful, intuitive interfaces.</p>
                             </div>
 
-                            <div class="feature-card clickable-card" onclick="smartClick(event, () => window.location.href = './projects/')">
+                            <div class="feature-card clickable-card" onclick="smartClick(event, () => window.location.href = 'projects/')">
                                 <div class="feature-icon">
                                     <i data-feather="target"></i>
                                 </div>
@@ -2021,474 +2026,116 @@
             }
         }
 
-        async function signInWith(provider) {
-            console.log(`Signing in with ${provider}`);
-            
-            switch(provider) {
-                case 'google':
-                    await initiateGoogleAuth();
-                    break;
-                case 'github':
-                    console.log('GitHub OAuth not yet implemented');
-                    break;
-                case 'linkedin':
-                    console.log('LinkedIn OAuth not yet implemented');
-                    break;
-            }
-        }
+        // Simple Supabase initialization
+        const supabase = window.supabase.createClient(
+            'https://udzhmsqqzodprrsypzmd.supabase.co',
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVkemhtc3Fxem9kcHJyc3lwem1kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI5Njg1MjcsImV4cCI6MjA2ODU0NDUyN30.Ox3AN68fC-dUoUHKiMjbyNUfcyCAMLDJCM9teE5YJNI'
+        );
 
-        async function initiateGoogleAuth() {
+        // Simple sign in function
+        async function signInWith(provider) {
+            const supabaseProvider = provider === 'linkedin' ? 'linkedin_oidc' : provider;
+            
             try {
-                console.log('Initiating Google OAuth...');
-                const response = await fetch('http://localhost:8081/api/google/auth/url');
+                const { error } = await supabase.auth.signInWithOAuth({
+                    provider: supabaseProvider,
+                    options: {
+                        redirectTo: window.location.origin + '/?auth=success'
+                    }
+                });
                 
-                console.log('Response status:', response.status);
-                
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    console.error('Server error:', errorText);
-                    alert(`Server error (${response.status}): ${errorText}`);
-                    return;
-                }
-                
-                const data = await response.json();
-                console.log('OAuth response:', data);
-                
-                if (data.auth_url) {
-                    // Store state for verification
-                    sessionStorage.setItem('oauth_state', data.state);
-                    console.log('Redirecting to Google OAuth...');
-                    // Redirect to Google OAuth
-                    window.location.href = data.auth_url;
-                } else {
-                    console.error('No auth_url in response:', data);
-                    alert(`Failed to get OAuth URL: ${data.error || 'Unknown error'}`);
+                if (error) {
+                    console.error('OAuth error:', error);
+                    alert('Sign-in failed: ' + error.message);
                 }
             } catch (error) {
-                console.error('Network/fetch error:', error);
-                alert(`Network error: ${error.message}. Is the server running on port 8081?`);
+                console.error('OAuth error:', error);
+                alert('Sign-in failed');
             }
         }
 
-        function signInWithEmail(event) {
-            event.preventDefault();
-            const email = event.target.querySelector('input[type="email"]').value;
-            
-            // Implement email authentication here
-            console.log(`Signing in with email: ${email}`);
-            
-            // For demo purposes, simulate successful login
-            setTimeout(() => {
-                simulateLogin(email);
-                hideAuthModal();
-            }, 1000);
-        }
-
-        function adminDemo() {
-            simulateLogin('admin@membercommons.local', 'Admin User');
-        }
-
-        function simulateLogin(email, name = null) {
-            AppState.isAuthenticated = true;
-            AppState.currentUser = {
-                email: email,
-                name: name || email.split('@')[0],
-                role: email.includes('admin') ? 'admin' : 'user'
-            };
-            
-            updateAuthUI();
-        }
-
-        function signOut() {
-            AppState.isAuthenticated = false;
-            AppState.currentUser = null;
-            updateAuthUI();
-        }
-
-        function updateAuthUI() {
+        // Auth helper functions
+        function simulateLogin(email, name) {
             const authContainer = document.getElementById('auth-container');
-            
-            if (AppState.isAuthenticated) {
+            if (authContainer) {
                 authContainer.innerHTML = `
-                    <span style="color: var(--text-secondary); margin-right: 12px;">
-                        Welcome, ${AppState.currentUser.name}
-                    </span>
-                    <button class="btn btn-secondary" onclick="signOut()">Sign Out</button>
+                    <div class="auth-user-info" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <span class="welcome-text" style="color: var(--text-primary); font-weight: 500; font-size: 14px;">Welcome, ${name}</span>
+                        <button class="btn logout-btn" onclick="logout()" style="
+                            background: linear-gradient(135deg, #8B5CF6, #A855F7); 
+                            color: white; 
+                            border: none; 
+                            padding: 8px 16px; 
+                            border-radius: 6px; 
+                            font-size: 14px; 
+                            font-weight: 500;
+                            display: flex; 
+                            align-items: center; 
+                            gap: 6px;
+                            transition: all 0.2s ease;
+                            box-shadow: 0 2px 4px rgba(139, 92, 246, 0.2);
+                        " onmouseover="this.style.background='linear-gradient(135deg, #7C3AED, #9333EA)'; this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 8px rgba(139, 92, 246, 0.3)';" onmouseout="this.style.background='linear-gradient(135deg, #8B5CF6, #A855F7)'; this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 4px rgba(139, 92, 246, 0.2)';">
+                            <span style="font-size: 16px;">🚪</span>
+                            <span class="logout-text">Sign Out</span>
+                        </button>
+                    </div>
+                    <style>
+                        @media (max-width: 768px) {
+                            .auth-user-info {
+                                flex-direction: column;
+                                align-items: flex-end !important;
+                                gap: 8px !important;
+                            }
+                            .welcome-text {
+                                font-size: 13px !important;
+                            }
+                            .logout-btn {
+                                padding: 6px 12px !important;
+                                font-size: 13px !important;
+                            }
+                        }
+                        @media (max-width: 480px) {
+                            .logout-text {
+                                display: none;
+                            }
+                            .logout-btn {
+                                padding: 8px !important;
+                                min-width: 40px;
+                                justify-content: center;
+                            }
+                        }
+                    </style>
                 `;
-            } else {
+            }
+        }
+
+        function logout() {
+            supabase.auth.signOut();
+            const authContainer = document.getElementById('auth-container');
+            if (authContainer) {
                 authContainer.innerHTML = `
                     <button class="btn btn-secondary" onclick="showAuthModal()">Sign In</button>
-                    <button class="btn btn-primary" onclick="adminDemo()">Search Projects</button>
                 `;
             }
         }
 
-        // API Functions loaded from common.js
-
-        // Load initial data
-        async function loadInitialData() {
-            try {
-                // Test backend connection
-                const healthCheck = await apiCall('/health');
-                console.log('Backend health check:', healthCheck);
-                
-                // Load user data if authenticated
-                if (AppState.isAuthenticated) {
-                    // Load user-specific data
-                }
-                
-            } catch (error) {
-                console.log('Backend not available, using demo data');
+        // Simple auth listener
+        supabase.auth.onAuthStateChange((event, session) => {
+            if (event === 'SIGNED_IN' && session) {
+                console.log('User signed in:', session.user.email);
+                simulateLogin(session.user.email, session.user.user_metadata?.full_name || session.user.email.split('@')[0]);
+                hideAuthModal();
+            } else if (event === 'SIGNED_OUT') {
+                console.log('User signed out');
             }
-        }
-
-        // Initialize HashRouter
-        const router = new HashRouter();
-
-        // Setup tab click handlers for all sections
-        function setupTabHandlers() {
-            // Handle tab clicks for both People and Account sections
-            document.addEventListener('click', function(e) {
-                if (e.target.matches('.tab[data-tab]')) {
-                    e.preventDefault();
-                    
-                    const tabName = e.target.dataset.tab;
-                    const section = e.target.closest('.section');
-                    
-                    if (section) {
-                        let sectionName = '';
-                        if (section.id === 'people-section') {
-                            sectionName = 'people';
-                        } else if (section.id === 'account-section') {
-                            sectionName = 'account';
-                        } else if (section.id === 'home-section') {
-                            sectionName = 'home';
-                        } else if (section.id === 'projects-section') {
-                            sectionName = 'projects';
-                        }
-                        
-                        if (sectionName && tabName) {
-                            // Navigate using the router
-                            router.navigate(sectionName, tabName);
-                        }
-                    }
-                }
-            });
-        }
-
-        // Production-level Authentication Management
-        async function checkAuthenticationStatus() {
-            console.log('Starting authentication check...');
-            
-            // Check if this is an OAuth callback
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('auth') === 'success') {
-                console.log('✅ OAuth callback: SUCCESS - retrieving user data...');
-                
-                // Debug session before checking user
-                await debugSession();
-                
-                // Handle successful OAuth callback
-                const user = await getCurrentUser();
-                
-                if (user) {
-                    console.log('Authentication successful for:', user.email);
-                } else {
-                    console.warn('⚠️ OAuth success but user retrieval failed');
-                }
-                
-                // Clear the URL parameter
-                window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-                return;
-            } else if (urlParams.get('auth') === 'error') {
-                console.error('❌ OAuth callback: ERROR - authentication failed');
-                const errorMessage = urlParams.get('message') || 'unknown_error';
-                console.error('📋 OAuth error details:', errorMessage);
-                
-                // Show user-friendly error message
-                let friendlyMessage = 'Google sign-in failed. ';
-                switch(errorMessage) {
-                    case 'oauth_not_configured':
-                        friendlyMessage += 'Google OAuth is not configured on the server.';
-                        break;
-                    case 'token_exchange_failed':
-                        friendlyMessage += 'Failed to exchange authorization code.';
-                        break;
-                    case 'user_info_failed':
-                    case 'user_info_parse_failed':
-                        friendlyMessage += 'Failed to retrieve user information from Google.';
-                        break;
-                    case 'network_error':
-                        friendlyMessage += 'Network error occurred during authentication.';
-                        break;
-                    case 'session_store_failed':
-                        friendlyMessage += 'Failed to create user session.';
-                        break;
-                    default:
-                        friendlyMessage += 'Please try again.';
-                }
-                
-                alert(friendlyMessage);
-                
-                // Clear the URL parameters
-                window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-                return;
-            }
-            
-            // Check existing session
-            console.log('Checking existing session...');
-            await getCurrentUser();
-        }
-
-        // Simplified authentication management
-        async function getCurrentUser() {
-            try {
-                console.log('Checking current user authentication...');
-                const response = await fetch('http://localhost:8081/api/google/auth/user', {
-                    method: 'GET',
-                    credentials: 'include',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
-                
-                if (!response.ok) {
-                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-                }
-                
-                const data = await response.json();
-                console.log('Auth response:', data);
-                
-                if (data.success && data.user) {
-                    console.log('User authenticated:', data.user.email);
-                    console.log('Setting AppState.currentUser to:', data.user);
-                    AppState.isAuthenticated = true;
-                    AppState.currentUser = data.user;
-                    console.log('Calling updateAuthUI...');
-                    updateAuthUI();
-                    console.log('AppState after update:', AppState);
-                    return data.user;
-                } else {
-                    console.log('User not authenticated:', data.error || 'Unknown error');
-                    AppState.isAuthenticated = false;
-                    AppState.currentUser = null;
-                    updateAuthUI();
-                    return null;
-                }
-            } catch (error) {
-                console.error('Authentication check failed:', error);
-                AppState.isAuthenticated = false;
-                AppState.currentUser = null;
-                updateAuthUI();
-                return null;
-            }
-        }
-        
-        async function debugSession() {
-            try {
-                const response = await fetch('http://localhost:8081/api/google/auth/session-debug', {
-                    credentials: 'include'
-                });
-                const data = await response.json();
-                console.log('Session Debug:', data);
-                return data;
-            } catch (error) {
-                console.error('Session debug failed:', error);
-                return null;
-            }
-        }
-
-        async function logoutUser() {
-            try {
-                console.log('Logging out user...');
-                const response = await fetch('http://localhost:8081/api/google/auth/logout', { 
-                    method: 'POST',
-                    credentials: 'include',  // Include cookies for cross-port authentication
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
-                
-                if (response.ok) {
-                    console.log('Logout successful');
-                } else {
-                    console.warn('Logout response not OK:', response.status);
-                }
-                
-                // Clear local state regardless of response
-                AppState.isAuthenticated = false;
-                AppState.currentUser = null;
-                updateAuthUI();
-                
-                // Redirect to home
-                window.location.hash = '#home/welcome';
-            } catch (error) {
-                console.error(' Logout error:', error);
-                // Still clear local state on error
-                AppState.isAuthenticated = false;
-                AppState.currentUser = null;
-                updateAuthUI();
-            }
-        }
-
-        function updateAuthUI() {
-            const authContainer = document.getElementById('auth-container');
-            const authButton = authContainer?.querySelector('.btn');
-            
-            if (AppState.isAuthenticated && AppState.currentUser) {
-                if (authButton) {
-                    authButton.innerHTML = `
-                        ${AppState.currentUser.name || AppState.currentUser.email}
-                        <span style="margin-left: 10px; cursor: pointer;" onclick="logoutUser()" title="Logout">🚪</span>
-                    `;
-                    authButton.onclick = () => window.location.hash = '#account/preferences';
-                }
-            } else {
-                if (authButton) {
-                    authButton.textContent = 'Sign In';
-                    authButton.onclick = showAuthModal;
-                }
-            }
-        }
-
-        // Simple test - this should work if JavaScript is parsing correctly
-        window.simpleTest = function() {
-            console.log('JavaScript is working!');
-            return 'SUCCESS';
-        };
-        
-        // Test function for manual debugging
-        window.testAuth = async function() {
-            console.log('Manual auth test started...');
-            await getCurrentUser();
-            await debugSession();
-        };
-        
-        // Manual UI test
-        window.testUI = function() {
-            console.log('Testing UI update...');
-            console.log('Current AppState:', AppState);
-            
-            // Check if auth container exists
-            const authContainer = document.getElementById('auth-container');
-            console.log('Auth container element:', authContainer);
-            
-            updateAuthUI();
-            console.log('UI update called');
-            
-            // Check what happened to the auth container after update
-            console.log('Auth container after update:', authContainer);
-            if (authContainer) {
-                console.log('Auth container HTML:', authContainer.innerHTML);
-            }
-        };
-        
-        // Initialize the application
-        document.addEventListener('DOMContentLoaded', function() {
-            console.log('DOM Content Loaded - Starting application initialization...');
-            
-            // Check authentication status and handle OAuth callback
-            checkAuthenticationStatus();
-            
-            // Setup tab click handlers
-            setupTabHandlers();
-
-            loadInitialData();
-            
-            // Initialize projects manager
-            if (window.projectsManager) {
-                window.projectsManager.init();
-            }
-            
-            // Initialize survey and skills managers
-            if (window.surveyManager) {
-                window.surveyManager.init();
-                window.surveyManager.loadSavedResponses();
-            }
-            
-            if (window.skillsManager) {
-                window.skillsManager.init();
-            }
-            
-            // Setup filter change handlers to update URL
-            setupFilterHandlers();
-            
-            // Close modal when clicking outside
-            document.getElementById('auth-modal').addEventListener('click', function(e) {
-                if (e.target === this) {
-                    hideAuthModal();
-                }
-            });
         });
 
-        // Setup handlers for filters to update URL parameters
-        function setupFilterHandlers() {
-            // Project filters
-            document.addEventListener('change', function(e) {
-                if (e.target.matches('select[name="project-filter"]')) {
-                    const filterValue = e.target.value;
-                    if (filterValue) {
-                        router.setParam('filter', filterValue);
-                    } else {
-                        router.removeParam('filter');
-                    }
-                }
-            });
-
-            // Location filters
-            document.addEventListener('change', function(e) {
-                if (e.target.matches('select') && e.target.querySelector('option[value*="atlanta"], option[value*="portland"], option[value*="detroit"]')) {
-                    const cityValue = e.target.value;
-                    if (cityValue) {
-                        router.setParam('city', cityValue);
-                    } else {
-                        router.removeParam('city');
-                    }
-                }
-            });
-
-            // Search inputs
-            let searchTimeout;
-            document.addEventListener('input', function(e) {
-                if (e.target.matches('input[type="text"][placeholder*="search" i]')) {
-                    clearTimeout(searchTimeout);
-                    searchTimeout = setTimeout(() => {
-                        const searchValue = e.target.value.trim();
-                        if (searchValue) {
-                            router.setParam('search', searchValue);
-                        } else {
-                            router.removeParam('search');
-                        }
-                    }, 500); // Debounce search updates
-                }
-            });
-        }
-
-        // Function to handle smart clicking - prevents navigation when text is selected
-        function smartClick(event, navigationFunction) {
-            // Check if user has selected text
-            const selection = window.getSelection();
-            if (selection && selection.toString().length > 0) {
-                // User has selected text, don't navigate
-                event.preventDefault();
-                event.stopPropagation();
-                return false;
+        // Check for existing session
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            if (session) {
+                simulateLogin(session.user.email, session.user.user_metadata?.full_name || session.user.email.split('@')[0]);
             }
-            
-            // Check if user is currently in the process of selecting text
-            if (event.detail > 1) {
-                // This is a multi-click (double/triple click), might be text selection
-                const target = event.target;
-                if (target && (target.tagName === 'P' || target.tagName === 'H3' || target.tagName === 'LI' || target.tagName === 'SPAN')) {
-                    // Clicked on text element, allow potential text selection
-                    event.preventDefault();
-                    return false;
-                }
-            }
-            
-            // No text selected and not a text selection attempt, proceed with navigation
-            navigationFunction();
-        }
+        });
 
         // Handle window resize for responsive design
         window.addEventListener('resize', function() {

@@ -23,6 +23,13 @@ use oauth2::basic::BasicClient;
 use oauth2::reqwest::async_http_client;
 use oauth2::{AuthorizationCode, TokenResponse};
 use actix_web::cookie::time::Duration as CookieDuration;
+use jsonwebtoken::{decode, Validation, DecodingKey, Algorithm};
+use actix_web::{dev::ServiceRequest, Error};
+use actix_web::dev::{ServiceResponse, Transform};
+use actix_session::SessionExt;
+use std::future::{Ready, ready};
+use std::task::{Context as TaskContext, Poll};
+use actix_web::body::EitherBody;
 
 // Google Sheets API imports (TODO: Fix version conflicts)
 // use google_sheets4::{Sheets, api::ValueRange};
@@ -51,6 +58,16 @@ struct Config {
     allowed_redirect_domains: Vec<String>,
     is_production: bool,
     frontend_url: String,
+    // Supabase configuration
+    supabase_url: String,
+    supabase_service_role_key: String,
+    supabase_anon_key: String,
+    // LinkedIn OAuth
+    linkedin_client_id: Option<String>,
+    linkedin_client_secret: Option<String>,
+    // GitHub OAuth
+    github_client_id: Option<String>,
+    github_client_secret: Option<String>,
 }
 
 // Thread-safe configuration holder
@@ -127,6 +144,19 @@ impl Config {
                 is_production: std::env::var("NODE_ENV").unwrap_or_default() == "production",
                 frontend_url: std::env::var("FRONTEND_URL")
                     .unwrap_or_else(|_| "http://localhost:8887/team".to_string()),
+                // Supabase configuration
+                supabase_url: std::env::var("SUPABASE_URL")
+                    .unwrap_or_else(|_| "your-supabase-url".to_string()),
+                supabase_service_role_key: std::env::var("SUPABASE_JWT_SECRET")
+                    .unwrap_or_else(|_| "your-supabase-jwt-secret".to_string()),
+                supabase_anon_key: std::env::var("SUPABASE_ANON_KEY")
+                    .unwrap_or_else(|_| "your-supabase-anon-key".to_string()),
+                // LinkedIn OAuth
+                linkedin_client_id: std::env::var("LINKEDIN_CLIENT_ID").ok(),
+                linkedin_client_secret: std::env::var("LINKEDIN_CLIENT_SECRET").ok(),
+                // GitHub OAuth
+                github_client_id: std::env::var("GITHUB_CLIENT_ID").ok(),
+                github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").ok(),
             })
         }
     }
@@ -365,6 +395,47 @@ struct OAuthCallbackRequest {
     state: Option<String>,
 }
 
+// JWT Claims structure
+#[derive(Debug, Serialize, Deserialize)]
+struct JWTClaims {
+    sub: String, // user id
+    email: String,
+    name: String,
+    picture: Option<String>,
+    provider: String, // google, github, linkedin
+    exp: usize, // expiration timestamp
+    iat: usize, // issued at timestamp
+}
+
+// Supabase auth response
+#[derive(Debug, Serialize, Deserialize)]
+struct SupabaseAuthResponse {
+    success: bool,
+    user: Option<SupabaseUser>,
+    session: Option<SupabaseSession>,
+    error: Option<String>,
+}
+
+// Supabase user structure
+#[derive(Debug, Serialize, Deserialize)]
+struct SupabaseUser {
+    id: String,
+    email: String,
+    user_metadata: serde_json::Value,
+    app_metadata: serde_json::Value,
+    created_at: String,
+}
+
+// Supabase session structure
+#[derive(Debug, Serialize, Deserialize)]
+struct SupabaseSession {
+    access_token: String,
+    token_type: String,
+    expires_in: i64,
+    refresh_token: String,
+    user: SupabaseUser,
+}
+
 // User session info
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct UserSession {
@@ -372,6 +443,7 @@ struct UserSession {
     email: String,
     name: String,
     picture: Option<String>,
+    provider: String,
     created_at: i64,
     expires_at: i64,
 }
@@ -391,8 +463,100 @@ impl UserSession {
             email,
             name,
             picture,
+            provider: "google".to_string(),
             created_at: now,
             expires_at,
+        }
+    }
+}
+
+// Authentication middleware
+pub struct AuthMiddleware;
+
+impl<S, B> Transform<S, ServiceRequest> for AuthMiddleware
+where
+    S: actix_web::dev::Service<
+        ServiceRequest,
+        Response = ServiceResponse<B>,
+        Error = Error,
+    >,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type InitError = ();
+    type Transform = AuthMiddlewareService<S>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ready(Ok(AuthMiddlewareService { service }))
+    }
+}
+
+pub struct AuthMiddlewareService<S> {
+    service: S,
+}
+
+impl<S, B> actix_web::dev::Service<ServiceRequest> for AuthMiddlewareService<S>
+where
+    S: actix_web::dev::Service<
+        ServiceRequest,
+        Response = ServiceResponse<B>,
+        Error = Error,
+    >,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>>>,
+    >;
+
+    fn poll_ready(&self, cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
+    }
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let path = req.path().to_string();
+        
+        // Skip auth for public endpoints
+        if path.starts_with("/api/auth") || 
+           path.starts_with("/api/health") || 
+           path.starts_with("/api/recommendations") ||
+           path.contains("debug") ||
+           path.contains("oauth") {
+            let fut = self.service.call(req);
+            return Box::pin(async move {
+                let res = fut.await?;
+                Ok(res.map_into_left_body())
+            });
+        }
+
+        // Check session for protected routes
+        let (http_req, payload) = req.into_parts();
+        let session = http_req.get_session();
+        
+        match session.get::<UserSession>("user") {
+            Ok(Some(user_session)) if !user_session.is_expired() => {
+                // User is authenticated
+                let req = ServiceRequest::from_parts(http_req, payload);
+                let fut = self.service.call(req);
+                Box::pin(async move {
+                    let res = fut.await?;
+                    Ok(res.map_into_left_body())
+                })
+            }
+            _ => {
+                // User is not authenticated or session expired
+                let response = HttpResponse::Unauthorized()
+                    .json(json!({"error": "Authentication required"}))
+                    .map_into_right_body();
+                Box::pin(async move {
+                    Ok(ServiceResponse::new(http_req, response))
+                })
+            }
         }
     }
 }
@@ -911,7 +1075,7 @@ fn get_redirect_uri(config: &Config) -> String {
         &config.server_host
     };
     
-    format!("http://{}:{}/api/google/auth/callback", host, config.server_port)
+    format!("http://{}:{}/api/auth/google/callback", host, config.server_port)
 }
 
 fn create_oauth_client(config: &Config) -> BasicClient {
@@ -1248,7 +1412,7 @@ async fn debug_oauth_config(data: web::Data<SharedConfig>) -> Result<HttpRespons
         },
         "instructions": {
             "setup": "1. Copy .env.example to .env, 2. Set Google credentials, 3. Restart server",
-            "test_url": "/api/google/auth/url",
+            "test_url": "/api/auth/google/url",
             "google_console": "https://console.cloud.google.com/apis/credentials"
         }
     })))
@@ -1259,11 +1423,238 @@ async fn verify_google_auth(_req: web::Json<GoogleAuthRequest>) -> Result<HttpRe
         "success": false,
         "error": "Deprecated endpoint. Use OAuth flow instead.",
         "oauth_endpoints": {
-            "start_auth": "/api/google/auth/url",
-            "callback": "/api/google/auth/callback", 
-            "current_user": "/api/google/auth/user",
-            "logout": "/api/google/auth/logout"
+            "start_auth": "/api/auth/google/url",
+            "callback": "/api/auth/google/callback", 
+            "current_user": "/api/auth/user",
+            "logout": "/api/auth/logout"
         }
+    })))
+}
+
+// LinkedIn OAuth handlers
+async fn linkedin_auth_url(data: web::Data<SharedConfig>) -> Result<HttpResponse> {
+    let config = match data.lock() {
+        Ok(config) => config,
+        Err(_) => {
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": "Authentication service temporarily unavailable",
+            })));
+        }
+    };
+
+    let client_id = match &config.linkedin_client_id {
+        Some(id) if !id.contains("your-linkedin-client-id") => id,
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(json!({
+                "error": "LinkedIn OAuth not configured",
+            })));
+        }
+    };
+
+    let client_secret = match &config.linkedin_client_secret {
+        Some(secret) if !secret.contains("your-linkedin-client-secret") => secret,
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(json!({
+                "error": "LinkedIn OAuth client secret not configured",
+            })));
+        }
+    };
+
+    let redirect_uri = format!("http://{}:{}/api/auth/linkedin/callback", config.server_host, config.server_port);
+    
+    let client = BasicClient::new(
+        ClientId::new(client_id.clone()),
+        Some(ClientSecret::new(client_secret.clone())),
+        AuthUrl::new("https://www.linkedin.com/oauth/v2/authorization".to_string()).unwrap(),
+        Some(TokenUrl::new("https://www.linkedin.com/oauth/v2/accessToken".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(redirect_uri).unwrap());
+
+    let (auth_url, csrf_token) = client
+        .authorize_url(CsrfToken::new_random)
+        .add_scope(Scope::new("r_liteprofile".to_string()))
+        .add_scope(Scope::new("r_emailaddress".to_string()))
+        .url();
+
+    Ok(HttpResponse::Ok().json(OAuthUrlResponse {
+        auth_url: auth_url.to_string(),
+        state: csrf_token.secret().clone(),
+    }))
+}
+
+async fn linkedin_auth_callback(
+    _query: web::Query<OAuthCallbackRequest>,
+    data: web::Data<SharedConfig>,
+    session: Session,
+) -> Result<HttpResponse> {
+    let config = data.lock().unwrap();
+    
+    if config.linkedin_client_id.is_none() || config.linkedin_client_secret.is_none() {
+        return Ok(create_auth_redirect(false, Some("linkedin_not_configured"), &config));
+    }
+
+    // For now, return demo user until full LinkedIn implementation
+    let user_session = UserSession {
+        user_id: "linkedin_demo_user".to_string(),
+        email: "demo@linkedin.com".to_string(),
+        name: "LinkedIn Demo User".to_string(),
+        picture: None,
+        provider: "linkedin".to_string(),
+        created_at: chrono::Utc::now().timestamp(),
+        expires_at: chrono::Utc::now().timestamp() + 3600, // 1 hour
+    };
+
+    session.insert("user", &user_session).unwrap_or_default();
+    Ok(create_auth_redirect(true, None, &config))
+}
+
+// GitHub OAuth handlers
+async fn github_auth_url(data: web::Data<SharedConfig>) -> Result<HttpResponse> {
+    let config = match data.lock() {
+        Ok(config) => config,
+        Err(_) => {
+            return Ok(HttpResponse::InternalServerError().json(json!({
+                "error": "Authentication service temporarily unavailable",
+            })));
+        }
+    };
+
+    let client_id = match &config.github_client_id {
+        Some(id) if !id.contains("your-github-client-id") => id,
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(json!({
+                "error": "GitHub OAuth not configured",
+            })));
+        }
+    };
+
+    let client_secret = match &config.github_client_secret {
+        Some(secret) if !secret.contains("your-github-client-secret") => secret,
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(json!({
+                "error": "GitHub OAuth client secret not configured",
+            })));
+        }
+    };
+
+    let redirect_uri = format!("http://{}:{}/api/auth/github/callback", config.server_host, config.server_port);
+    
+    let client = BasicClient::new(
+        ClientId::new(client_id.clone()),
+        Some(ClientSecret::new(client_secret.clone())),
+        AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap(),
+        Some(TokenUrl::new("https://github.com/login/oauth/access_token".to_string()).unwrap()),
+    )
+    .set_redirect_uri(RedirectUrl::new(redirect_uri).unwrap());
+
+    let (auth_url, csrf_token) = client
+        .authorize_url(CsrfToken::new_random)
+        .add_scope(Scope::new("user:email".to_string()))
+        .url();
+
+    Ok(HttpResponse::Ok().json(OAuthUrlResponse {
+        auth_url: auth_url.to_string(),
+        state: csrf_token.secret().clone(),
+    }))
+}
+
+async fn github_auth_callback(
+    _query: web::Query<OAuthCallbackRequest>,
+    data: web::Data<SharedConfig>,
+    session: Session,
+) -> Result<HttpResponse> {
+    let config = data.lock().unwrap();
+    
+    if config.github_client_id.is_none() || config.github_client_secret.is_none() {
+        return Ok(create_auth_redirect(false, Some("github_not_configured"), &config));
+    }
+
+    // For now, return demo user until full GitHub implementation
+    let user_session = UserSession {
+        user_id: "github_demo_user".to_string(),
+        email: "demo@github.com".to_string(),
+        name: "GitHub Demo User".to_string(),
+        picture: None,
+        provider: "github".to_string(),
+        created_at: chrono::Utc::now().timestamp(),
+        expires_at: chrono::Utc::now().timestamp() + 3600, // 1 hour
+    };
+
+    session.insert("user", &user_session).unwrap_or_default();
+    Ok(create_auth_redirect(true, None, &config))
+}
+
+// Supabase integration handlers
+#[derive(Debug, Serialize, Deserialize)]
+struct SupabaseTokenRequest {
+    access_token: String,
+    provider: String,
+}
+
+async fn verify_supabase_token(
+    req: web::Json<SupabaseTokenRequest>,
+    data: web::Data<SharedConfig>,
+    session: Session,
+) -> Result<HttpResponse> {
+    let config = data.lock().unwrap();
+    
+    // Verify the Supabase JWT token using the JWT secret
+    let validation = Validation::new(Algorithm::HS256);
+    let decoding_key = DecodingKey::from_secret(config.supabase_service_role_key.as_bytes());
+    
+    match decode::<JWTClaims>(&req.access_token, &decoding_key, &validation) {
+        Ok(token_data) => {
+            let user_session = UserSession {
+                user_id: token_data.claims.sub.clone(),
+                email: token_data.claims.email.clone(),
+                name: token_data.claims.name.clone(),
+                picture: token_data.claims.picture.clone(),
+                provider: req.provider.clone(),
+                created_at: chrono::Utc::now().timestamp(),
+                expires_at: token_data.claims.exp as i64,
+            };
+
+            session.insert("user", &user_session).unwrap_or_default();
+            
+            Ok(HttpResponse::Ok().json(json!({
+                "success": true,
+                "user": user_session
+            })))
+        }
+        Err(e) => {
+            log::error!("JWT verification failed: {:?}", e);
+            Ok(HttpResponse::Unauthorized().json(json!({
+                "success": false,
+                "error": "Invalid token"
+            })))
+        }
+    }
+}
+
+async fn create_supabase_session(
+    req: web::Json<SupabaseSession>,
+    session: Session,
+) -> Result<HttpResponse> {
+    let user_session = UserSession {
+        user_id: req.user.id.clone(),
+        email: req.user.email.clone(),
+        name: req.user.user_metadata.get("full_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string(),
+        picture: req.user.user_metadata.get("avatar_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        provider: "supabase".to_string(),
+        created_at: chrono::Utc::now().timestamp(),
+        expires_at: chrono::Utc::now().timestamp() + req.expires_in,
+    };
+
+    session.insert("user", &user_session).unwrap_or_default();
+    
+    Ok(HttpResponse::Ok().json(json!({
+        "success": true,
+        "user": user_session
     })))
 }
 
@@ -2765,7 +3156,7 @@ async fn run_api_server(config: Config) -> anyhow::Result<()> {
     let csrf_store: CsrfTokenStore = Arc::new(Mutex::new(HashMap::new()));
     
     // Get server config from shared config
-    let (server_host, server_port, is_production) = {
+    let (server_host, server_port, _is_production) = {
         let config_guard = shared_config.lock().unwrap();
         (config_guard.server_host.clone(), config_guard.server_port, config_guard.is_production)
     };
@@ -2850,18 +3241,38 @@ async fn run_api_server(config: Config) -> anyhow::Result<()> {
                             .route("/analyze", web::post().to(gemini_insights::analyze_with_gemini))
                     )
                     .service(
-                        web::scope("/google")
-                            .route("/create-project", web::post().to(create_google_project))
+                        web::scope("/auth")
+                            // Google OAuth
                             .service(
-                                web::scope("/auth")
+                                web::scope("/google")
                                     .route("/verify", web::post().to(verify_google_auth))
                                     .route("/url", web::get().to(google_auth_url))
                                     .route("/callback", web::get().to(google_auth_callback))
-                                    .route("/user", web::get().to(get_current_user))
-                                    .route("/logout", web::post().to(logout_user))
-                                    .route("/debug", web::get().to(debug_oauth_config))
-                                    .route("/session-debug", web::get().to(debug_session))
                             )
+                            // LinkedIn OAuth
+                            .service(
+                                web::scope("/linkedin")
+                                    .route("/url", web::get().to(linkedin_auth_url))
+                                    .route("/callback", web::get().to(linkedin_auth_callback))
+                            )
+                            // GitHub OAuth  
+                            .service(
+                                web::scope("/github")
+                                    .route("/url", web::get().to(github_auth_url))
+                                    .route("/callback", web::get().to(github_auth_callback))
+                            )
+                            // Common auth endpoints
+                            .route("/user", web::get().to(get_current_user))
+                            .route("/logout", web::post().to(logout_user))
+                            .route("/debug", web::get().to(debug_oauth_config))
+                            .route("/session-debug", web::get().to(debug_session))
+                            // Supabase integration
+                            .route("/supabase/verify", web::post().to(verify_supabase_token))
+                            .route("/supabase/session", web::post().to(create_supabase_session))
+                    )
+                    .service(
+                        web::scope("/google")
+                            .route("/create-project", web::post().to(create_google_project))
                             .service(
                                 web::scope("/sheets")
                                     .route("/config", web::get().to(get_sheets_config))
